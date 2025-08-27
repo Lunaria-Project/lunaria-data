@@ -6,7 +6,7 @@ ROOT = pathlib.Path(".").resolve()
 OUT_DIR = ROOT / "json"
 
 EXCEL_EXTS = {".xlsx", ".xlsm", ".xls"}
-CSV_EXTS = {".csv"}
+CSV_EXTS   = {".csv"}
 
 def is_temp_excel(name: str) -> bool:
     return name.startswith("~$")
@@ -24,47 +24,77 @@ def rel_to_out(path: pathlib.Path, sheet: str | None = None) -> pathlib.Path:
         name = f"{stem}.json"
     return OUT_DIR / parent / name
 
-def write_df(df: pd.DataFrame, out_path: pathlib.Path):
+def write_json(obj, out_path: pathlib.Path):
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.loads(df.to_json(orient="records", force_ascii=False))
-    out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def convert_excel(p: pathlib.Path):
-    print(f"[excel] {p}")
+def build_types(header_row, type_row):
+    types = {}
+    for col, typ in zip(header_row, type_row):
+        col = "" if pd.isna(col) else str(col)
+        if pd.isna(typ):
+            types[col] = None
+        else:
+            types[col] = str(typ)
+    return types
+
+def convert_excel(file_path: pathlib.Path):
+    print(f"[excel] {file_path}")
     try:
-        xls = pd.ExcelFile(p)  # .xls 필요 시 xlrd 설치 + engine="xlrd"
+        xls = pd.ExcelFile(file_path)  # .xls는 xlrd 필요할 수 있음
         for s in xls.sheet_names:
-            df = xls.parse(s)
+            # 0행: 타입, 1행: 헤더, 2행~: 데이터
+            type_row   = xls.parse(s, header=None, nrows=1).iloc[0].tolist()
+            header_row = xls.parse(s, header=None, skiprows=1, nrows=1).iloc[0].tolist()
+            df         = xls.parse(s, header=1)
+
             if df.empty or df.columns.size == 0:
                 print(f"  - skip empty sheet: {s}")
                 continue
-            out = rel_to_out(p, s)
-            write_df(df, out)
+
+            types = build_types(header_row, type_row)
+            rows  = df.values.tolist()
+
+            out = rel_to_out(file_path, s)
+            write_json({"types": types, "rows": rows}, out)
             print(f"  - wrote {out}")
     except Exception as e:
-        print(f"  ! excel fail: {p}\n    {e}")
+        print(f"  ! excel fail: {file_path}\n    {e}")
 
-def convert_csv(p: pathlib.Path):
-    print(f"[csv] {p}")
+def _read_csv(path, **kwargs):
     try:
-        try:
-            df = pd.read_csv(p)
-        except UnicodeDecodeError:
-            df = pd.read_csv(p, encoding="cp949")
+        return pd.read_csv(path, **kwargs)
+    except UnicodeDecodeError:
+        return pd.read_csv(path, encoding="cp949", **kwargs)
+
+def convert_csv(file_path: pathlib.Path):
+    print(f"[csv] {file_path}")
+    try:
+        # 0행: 타입, 1행: 헤더, 2행~: 데이터
+        type_row_df   = _read_csv(file_path, header=None, nrows=1)
+        header_row_df = _read_csv(file_path, header=None, skiprows=1, nrows=1)
+        df            = _read_csv(file_path, header=1)
+
         if df.empty or df.columns.size == 0:
             print("  - skip empty csv")
             return
-        out = rel_to_out(p, None)
-        write_df(df, out)
+
+        type_row   = type_row_df.iloc[0].tolist()
+        header_row = header_row_df.iloc[0].tolist()
+        types = build_types(header_row, type_row)
+        rows  = df.values.tolist()
+
+        out = rel_to_out(file_path, None)
+        write_json({"types": types, "rows": rows}, out)
         print(f"  - wrote {out}")
     except Exception as e:
-        print(f"  ! csv fail: {p}\n    {e}")
+        print(f"  ! csv fail: {file_path}\n    {e}")
 
 def collect_from_diff(diff_env: str):
     tgt = []
     for line in diff_env.splitlines():
         q = pathlib.Path(line.strip()).resolve()
-        if not q.exists():  # 삭제/리네임 등
+        if not q.exists():
             continue
         if is_temp_excel(q.name):
             continue
@@ -89,8 +119,10 @@ def main():
         print("[info] no targets")
         return
     for p in targets:
-        if p.suffix.lower() in EXCEL_EXTS: convert_excel(p)
-        elif p.suffix.lower() in CSV_EXTS: convert_csv(p)
+        if p.suffix.lower() in EXCEL_EXTS:
+            convert_excel(p)
+        elif p.suffix.lower() in CSV_EXTS:
+            convert_csv(p)
 
 if __name__ == "__main__":
     main()
