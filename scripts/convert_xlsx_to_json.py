@@ -65,6 +65,7 @@ def convert_excel(file_path: pathlib.Path):
                 continue
 
             types = build_types(header_row, type_row)
+            df = df.fillna("")
             rows  = df.values.tolist()
 
             out = rel_to_out(file_path, s)
@@ -86,6 +87,7 @@ def convert_csv(file_path: pathlib.Path):
         type_row_df   = _read_csv(file_path, header=None, nrows=1)
         header_row_df = _read_csv(file_path, header=None, skiprows=1, nrows=1)
         df            = _read_csv(file_path, header=1)
+        df = df.fillna("")
 
         if df.empty or df.columns.size == 0:
             print("  - skip empty csv")
