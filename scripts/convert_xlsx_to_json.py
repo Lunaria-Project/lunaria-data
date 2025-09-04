@@ -14,15 +14,30 @@ def is_temp_excel(name: str) -> bool:
 def safe_rel(path: pathlib.Path, start: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(os.path.relpath(path.resolve(), start.resolve()))
 
+def safe_name(s: str) -> str:
+    """파일/폴더 이름에 부적합한 문자를 안전하게 치환"""
+    keep = []
+    for ch in str(s):
+        if ch.isalnum() or ch in ("_", "-", " "):
+            keep.append(ch)
+        else:
+            keep.append("_")
+    name = "".join(keep).strip()
+    return name or "_"
+
 def rel_to_out(path: pathlib.Path, sheet: str | None = None) -> pathlib.Path:
-    rel = safe_rel(path, ROOT)
-    stem, parent = rel.stem, rel.parent
+    """
+    엑셀: json/<엑셀파일명>/<시트명>.json
+    CSV  : json/<csv파일명>/<csv파일명>.json
+    """
+    stem = safe_name(path.stem)
+    base_dir = OUT_DIR / stem
     if sheet:
-        sheet = sheet.replace("/", "_").replace("\\", "_")
-        name = f"{stem}__{sheet}.json"
+        sheet = safe_name(sheet)
+        file_name = f"{sheet}.json"
     else:
-        name = f"{stem}.json"
-    return OUT_DIR / parent / name
+        file_name = f"{stem}.json"
+    return base_dir / file_name
 
 def write_json(obj, out_path: pathlib.Path):
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -32,10 +47,7 @@ def build_types(header_row, type_row):
     types = {}
     for col, typ in zip(header_row, type_row):
         col = "" if pd.isna(col) else str(col)
-        if pd.isna(typ):
-            types[col] = None
-        else:
-            types[col] = str(typ)
+        types[col] = None if pd.isna(typ) else str(typ)
     return types
 
 def convert_excel(file_path: pathlib.Path):
@@ -115,6 +127,10 @@ def collect_full():
 def main():
     diff = os.environ.get("GIT_DIFF_FILES")
     targets = collect_from_diff(diff) if diff else collect_full()
+    # ✅ 안전망: diff가 있었는데도 타깃이 0개면 전체 스캔으로 폴백
+    if not targets and diff:
+        print("[info] no targets from diff -> full repository scan")
+        targets = collect_full()
     if not targets:
         print("[info] no targets")
         return
