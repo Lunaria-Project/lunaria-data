@@ -22,9 +22,11 @@ permissions:
   contents: read
 
 env:
-  JSON_REPO: Lunaria-Project/lunaria-data-json   # 결과 저장용 레포
-  JSON_BRANCH: main                              # 타깃 브랜치
-  JSON_SUBDIR: data                              # 타깃 레포에서 저장할 하위 폴더
+  JSON_REPO: Lunaria-Project/lunaria-data-json
+  JSON_BRANCH: main
+  JSON_SUBDIR: data
+  META_DIR: _meta
+  ID_MAP_BASENAME: id_map.json
 
 jobs:
   export:
@@ -61,7 +63,6 @@ jobs:
               echo "[fallback] no parent or diff failed -> list all tracked files"
               git ls-files > changed.txt
             fi
-
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "[pr] collect changed files vs base"
             git fetch origin '${{ github.base_ref }}' --depth=0
@@ -70,7 +71,6 @@ jobs:
               echo "[fallback] diff failed -> list all tracked files"
               git ls-files > changed.txt
             fi
-
           else
             echo "[other] list all tracked files"
             git ls-files > changed.txt
@@ -82,7 +82,6 @@ jobs:
 
           echo "Changed files:"; cat changed.txt
 
-          # ✅ 데이터 파일이 전혀 없으면 전체 스캔 강제 (스크립트/경로만 수정된 경우 대비)
           if ! grep -E '\.(xlsx|xlsm|xls|csv)$' changed.txt >/dev/null 2>&1; then
             echo "[info] no data file changed -> force full scan"
             git ls-files > changed.txt
@@ -91,22 +90,50 @@ jobs:
             echo "EOF" >> $GITHUB_ENV
           fi
 
+      - name: Prefetch id_map.json from JSON repo (if exists)
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ secrets.JSON_REPO_TOKEN }}
+        run: |
+          set -euxo pipefail
+          rm -rf prefetch
+          mkdir -p prefetch
+          cd prefetch
+          git init
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ env.JSON_REPO }}.git"
+          if git ls-remote --exit-code --heads origin ${{ env.JSON_BRANCH }}; then
+            git fetch origin ${{ env.JSON_BRANCH }} --depth=1
+            git checkout -B ${{ env.JSON_BRANCH }} FETCH_HEAD
+            if [ -f "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ]; then
+              cp "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ../id_map.json
+              echo "[prefetch] brought id_map.json → $(realpath ../id_map.json)"
+            else
+              echo "[prefetch] no existing id_map.json in JSON repo"
+            fi
+          else
+            echo "[prefetch] JSON branch not found; skipping"
+          fi
+          cd ..
+
       - name: Run converter
         env:
           GIT_DIFF_FILES: ${{ env.GIT_DIFF_FILES }}
+          ID_START: "1000000"
         run: |
+          set -euxo pipefail
           python scripts/convert_xlsx_to_json.py
-          echo "[debug] json directory:"
-          ls -R json || true
+          echo "[debug] json directory:"; ls -R json || true
+          echo "[debug] id_map.json presence:"; [ -f id_map.json ] && ls -l id_map.json || echo "id_map.json NOT FOUND"
 
       - name: Upload artifact (PR only)
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: json-output
-          path: json
+          path: |
+            json
+            id_map.json
 
-      # JSON 타깃 레포를 수동으로 준비 + 상세 로그
       - name: Prepare JSON target repo
         if: ${{ github.event_name == 'push' }}
         env:
@@ -120,27 +147,17 @@ jobs:
           git config user.name "json-export-bot"
           git config user.email "json-export-bot@users.noreply.github.com"
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ env.JSON_REPO }}.git"
-
-          echo "[debug] remotes:"
-          git remote -v
-          echo "[debug] ls-remote heads:"
-          git ls-remote --heads origin || true
-
           if git ls-remote --exit-code --heads origin ${{ env.JSON_BRANCH }}; then
-            echo "[info] target branch exists -> fetch & checkout"
             git fetch origin ${{ env.JSON_BRANCH }} --depth=1
             git checkout -B ${{ env.JSON_BRANCH }} FETCH_HEAD
           else
-            echo "[info] target branch missing -> create orphan"
             git checkout --orphan ${{ env.JSON_BRANCH }}
             echo "{}" > .init.json
             git add .init.json
             git commit -m "chore: initialize branch"
             git push -u origin ${{ env.JSON_BRANCH }}
           fi
-
-          echo "[debug] current branch:"
-          git branch -vv
+          cd ..
 
       - name: Copy, commit & push JSON to target repo
         if: ${{ github.event_name == 'push' }}
@@ -150,23 +167,30 @@ jobs:
           GH_TOKEN: ${{ secrets.JSON_REPO_TOKEN }}
         run: |
           set -euxo pipefail
+          git config --global --add safe.directory "$PWD"
 
-          mkdir -p "${{ env.JSON_SUBDIR }}"
-
+          mkdir -p "$JSON_SUBDIR"
           shopt -s nullglob
           for d in ../json/*/ ; do
             base="$(basename "$d")"
-            mkdir -p "${{ env.JSON_SUBDIR }}/${base}"
-            rsync -a --delete "$d" "${{ env.JSON_SUBDIR }}/${base}/"
+            mkdir -p "$JSON_SUBDIR/$base"
+            rsync -a --delete "$d" "$JSON_SUBDIR/$base/"
           done
-
           for f in ../json/*.json ; do
-            rsync -a "$f" "${{ env.JSON_SUBDIR }}/"
+            rsync -a "$f" "$JSON_SUBDIR/"
           done
 
-          echo "[debug] status before commit:"
-          git status
-          git diff --stat || true
+          # id_map.json 스냅샷 반영
+          if [ -f ../id_map.json ]; then
+            mkdir -p "$JSON_SUBDIR/$META_DIR"
+            cp ../id_map.json "$JSON_SUBDIR/$META_DIR/$ID_MAP_BASENAME"
+            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/$ID_MAP_BASENAME"
+          else
+            echo "[copy] id_map.json missing in workspace; nothing to copy"
+          fi
+
+          echo "[debug] files to commit (top 50):"
+          git status --porcelain | head -n 50
 
           if [ -n "$(git status --porcelain)" ]; then
             git add -A
@@ -177,4 +201,3 @@ jobs:
           else
             echo "No changes to push."
           fi
-      
