@@ -12,9 +12,10 @@ EXCEL_EXTS = {".xlsx", ".xlsm", ".xls"}
 CSV_EXTS   = {".csv"}
 
 # ===== 전역 매핑 설정 =====
-ID_MAP_PATH = pathlib.Path(os.environ.get("ID_MAP_PATH", "id_map.json"))  # 전역 매핑 JSON (레포 루트)
-ID_START    = int(os.environ.get("ID_START", "100000"))                   # 새 ID 시작 번호
-ID_TAG_RE   = re.compile(r"^\[(.+?)\]$")                                  # [아이디_이렇게]
+# 모든 파일/시트/컬럼에 등장하는 [태그]를 "하나의" id_map.json 에 전역 고유 숫자로 매핑
+ID_MAP_PATH = pathlib.Path(os.environ.get("ID_MAP_PATH", "id_map.json"))   # 전역 매핑 JSON (레포 루트)
+ID_START    = int(os.environ.get("ID_START", "1000000"))                   # 새 ID 시작 번호 (요청 반영)
+ID_TAG_RE   = re.compile(r"^\[(.+?)\]$")                                   # [아이디_이렇게]
 
 # ===== 유틸 =====
 def log(msg: str):
@@ -64,12 +65,21 @@ def base_type_of(t):
         return ""
     return t.split(';', 1)[0].strip().lower()
 
+def append_id_marker(t: str) -> str:
+    """types 문자열에 ';id' 꼬리표가 없으면 붙여준다."""
+    if not isinstance(t, str) or t == "":
+        return "int;id"
+    parts = [p.strip() for p in t.split(';') if p.strip() != ""]
+    if "id" not in (p.lower() for p in parts):
+        parts.append("id")
+    return ";".join(parts)
+
 # ===== 전역 매핑(id_map.json) 로드/저장 =====
 # 구조:
 # {
-#   "tags": { "테스트데이터_기사": 1001, ... },
-#   "used": [1001, 1002, 12345],
-#   "_next": 1003
+#   "tags": { "테스트데이터_기사": 1000000, ... },
+#   "used": [1000000, ...],
+#   "_next": 1000004
 # }
 def load_id_map() -> dict:
     if ID_MAP_PATH.exists():
@@ -84,10 +94,9 @@ def load_id_map() -> dict:
     return {"tags": {}, "used": [], "_next": ID_START}
 
 def save_id_map(idmap: dict):
-    # 폴더 보장 후 저장
     ID_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
     ID_MAP_PATH.write_text(json.dumps(idmap, ensure_ascii=False, indent=2), encoding="utf-8")
-    log(f"[id-map] saved at {ID_MAP_PATH.resolve()} (tags={len(idmap.get('tags', {}))}, used={len(idmap.get('used', []))})")
+    log(f"[id-map] saved at {ID_MAP_PATH.resolve()} (tags={len(idmap.get('tags', {}))}, used={len(idmap.get('used', []))}, next={idmap.get('_next')})")
 
 def _alloc_next_free(idmap: dict) -> int:
     used_tags_vals = {int(v) for v in idmap.get("tags", {}).values()}
@@ -112,20 +121,20 @@ def _must_int(v) -> int:
         return v
     return int(float(str(v)))
 
-def map_token_to_global_id(idmap: dict, token: str) -> int:
+def map_token_to_global_id(idmap: dict, token: str) -> (int, bool):
     """
-    token 이 "[태그]" 면 전역 tags에서 번호 반환(없으면 신규 배정).
-    token 이 숫자면 전역 used/tags와 충돌 없는지 검사 후 사용.
+    token 이 "[태그]" 면 전역 tags에서 번호 반환(없으면 신규 배정) → (id, True)
+    token 이 숫자면 전역 used/tags와 충돌 없는지 검사 후 사용 → (id, False)
     """
     m = ID_TAG_RE.match(token)
     if m:
         tag = m.group(1).strip()
         if tag in idmap["tags"]:
-            return int(idmap["tags"][tag])
+            return int(idmap["tags"][tag]), True
         new_id = _alloc_next_free(idmap)
         idmap["tags"][tag] = new_id
         _mark_used(idmap, new_id)
-        return new_id
+        return new_id, True
     else:
         val = _must_int(token)
         tags_vals = {int(v) for v in idmap["tags"].values()}
@@ -133,35 +142,47 @@ def map_token_to_global_id(idmap: dict, token: str) -> int:
         if val in tags_vals or val in used_vals:
             raise ValueError(f"[id-map] number {val} is already used globally")
         _mark_used(idmap, val)
-        return val
+        return val, False
 
-# ===== 숫자형 컬럼 전역 매핑 적용 =====
+# ===== 숫자형 컬럼 전역 매핑 적용 + ;id 마킹 =====
 def resolve_placeholders_for_numeric_columns(df: pd.DataFrame, types: dict, idmap: dict):
     """
     모든 숫자형 컬럼(int/long):
-      - 값이 ""(빈칸) → 0 (정책상 에러로 바꾸려면 여기서 raise)
-      - "[태그]" → 전역 id_map으로 숫자 매핑(불변)
+      - "" → 0
+      - "[태그]" → 전역 id_map으로 숫자 매핑(불변), 이 컬럼을 '매핑 컬럼'으로 기록
       - 숫자 → 전역 충돌 검사 후 사용
+    매핑이 '실제로 발생한' 컬럼(types[col])에는 ';id' 꼬리표를 자동으로 붙인다.
     """
     numeric_bases = {"int", "long"}
+    mapped_columns = set()
+
     for col in df.columns:
         base = base_type_of(types.get(col, ""))
         if base not in numeric_bases:
             continue
 
         seen_in_df = set()
+
         def map_cell(x):
             s = "" if pd.isna(x) else str(x).strip()
             if s == "":
-                val = 0
+                val, was_tag = 0, False
             else:
-                val = map_token_to_global_id(idmap, s)
+                val, was_tag = map_token_to_global_id(idmap, s)
+            # 같은 DF 내 중복 방지
             if val in seen_in_df:
                 raise ValueError(f"[id-map] duplicated value {val} within column '{col}' in this batch")
             seen_in_df.add(val)
+            # 이 셀에서 태그 매핑이 실제 일어났다면 표시
+            if was_tag:
+                mapped_columns.add(col)
             return val
 
         df[col] = df[col].apply(map_cell).astype("int64")
+
+    # 매핑이 실제로 발생한 컬럼의 types에 ';id' 꼬리표 붙이기
+    for col in mapped_columns:
+        types[col] = append_id_marker(types.get(col, "int"))
 
 # ===== 변환기 =====
 def convert_excel(file_path: pathlib.Path, idmap: dict):
@@ -229,6 +250,8 @@ def convert_csv(file_path: pathlib.Path, idmap: dict):
 # ===== 대상 수집 =====
 def collect_from_diff(diff_env: str):
     tgt = []
+    if not diff_env:
+        return tgt
     for line in diff_env.splitlines():
         q = pathlib.Path(line.strip()).resolve()
         if not q.exists():
@@ -257,7 +280,6 @@ def main():
     diff = os.environ.get("GIT_DIFF_FILES")
     targets = collect_from_diff(diff) if diff else collect_full()
 
-    # 전역 매핑 로드 (없으면 새로 만듦)
     idmap = load_id_map()
     log(f"[id-map] loaded (tags={len(idmap.get('tags', {}))}, used={len(idmap.get('used', []))}, next={idmap.get('_next')})")
 
@@ -266,7 +288,7 @@ def main():
         targets = collect_full()
 
     if not targets:
-        log("[info] no targets; still ensuring id_map.json exists")
+        log("[info] no targets; ensuring id_map.json exists")
         save_id_map(idmap)
         return
 
@@ -277,7 +299,6 @@ def main():
             elif p.suffix.lower() in CSV_EXTS:
                 convert_csv(p, idmap)
     finally:
-        # 변환 성공/실패와 무관하게 항상 저장
         save_id_map(idmap)
 
 if __name__ == "__main__":
