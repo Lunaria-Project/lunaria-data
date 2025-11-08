@@ -56,68 +56,12 @@ jobs:
           echo "[debug] json directory tree:"
           ls -R json || true
 
-      # ---- 타깃 레포 준비 (수동 git) ----
-      - name: Prepare JSON target repo
+      # ---- 타깃 레포 준비 + 인증 강제/진단 ----
+      - name: Prepare JSON target repo (auth + remote)
         env:
           GH_TOKEN: ${{ secrets.LUNARIA_PAT }}
         run: |
           set -euxo pipefail
-          rm -rf json-repo
-          mkdir -p json-repo
-          cd json-repo
-          git init
-          git config user.name "json-export-bot"
-          git config user.email "json-export-bot@users.noreply.github.com"
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ env.JSON_REPO }}.git"
-          if git ls-remote --exit-code --heads origin ${{ env.JSON_BRANCH }}; then
-            git fetch origin ${{ env.JSON_BRANCH }} --depth=1
-            git checkout -B ${{ env.JSON_BRANCH }} FETCH_HEAD
-          else
-            git checkout --orphan ${{ env.JSON_BRANCH }}
-            echo "{}" > .init.json
-            git add .init.json
-            git commit -m "chore: initialize branch"
-            git push -u origin ${{ env.JSON_BRANCH }}
-          fi
 
-      # ✅ 폴더별 동기화: 각 루트(엑셀 파일명) 안에서만 --delete
-      - name: Sync data folders (per-root, with delete)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p "json-repo/${{ env.JSON_SUBDIR }}"
-          shopt -s nullglob
-          for d in json/*/ ; do
-            base="$(basename "$d")"
-            mkdir -p "json-repo/${{ env.JSON_SUBDIR }}/${base}"
-            rsync -a --delete "$d" "json-repo/${{ env.JSON_SUBDIR }}/${base}/"
-          done
-          # 루트 직하 JSON이 있으면 복사(거의 없지만 대비)
-          for f in json/*.json ; do
-            rsync -a "$f" "json-repo/${{ env.JSON_SUBDIR }}/"
-          done
-
-          echo "[debug] synced files:"
-          find "json-repo/${{ env.JSON_SUBDIR }}" -type f -name "*.json" | sort | sed 's/^/  /'
-
-      - name: Commit & push
-        working-directory: json-repo
-        env:
-          GH_TOKEN: ${{ secrets.LUNARIA_PAT }}
-        run: |
-          set -euxo pipefail
-          git status
-          if [ -n "$(git status --porcelain)" ]; then
-            git add -A
-            REASON="${{ github.event.inputs.reason }}"
-            # 커밋 메시지: [실행자] : manual rebuild (optional reason)
-            if [ -n "$REASON" ]; then
-              MSG="[${{ github.actor }}] : manual rebuild - $REASON"
-            else
-              MSG="[${{ github.actor }}] : manual rebuild"
-            fi
-            git commit -m "$MSG"
-            git push origin HEAD:${{ env.JSON_BRANCH }}
-          else
-            echo "No changes to push."
-          fi
+          # 0) 시크릿 비어있으면 즉시 실패
+          test -n "$GH_TOKEN" || (echo "GH_TOKEN is EMPTY"; exit 1)
