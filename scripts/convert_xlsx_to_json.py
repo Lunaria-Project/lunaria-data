@@ -12,10 +12,9 @@ EXCEL_EXTS = {".xlsx", ".xlsm", ".xls"}
 CSV_EXTS   = {".csv"}
 
 # ===== 전역 매핑 설정 =====
-# 모든 파일/시트/컬럼에 등장하는 [태그]를 "하나의" id_map.json 에 전역 고유 숫자로 매핑
-ID_MAP_PATH = pathlib.Path(os.environ.get("ID_MAP_PATH", "id_map.json"))   # 전역 매핑 JSON (레포 루트)
-ID_START    = int(os.environ.get("ID_START", "1000000"))                   # 새 ID 시작 번호 (요청 반영)
-ID_TAG_RE   = re.compile(r"^\[(.+?)\]$")                                   # [아이디_이렇게]
+ID_MAP_PATH = pathlib.Path(os.environ.get("ID_MAP_PATH", "id_map.json"))
+ID_START    = int(os.environ.get("ID_START", "1000000"))
+ID_TAG_RE   = re.compile(r"^\[(.+?)\]$")
 
 # ===== 유틸 =====
 def log(msg: str):
@@ -74,47 +73,40 @@ def append_id_marker(t: str) -> str:
         parts.append("id")
     return ";".join(parts)
 
-# ===== 전역 매핑(id_map.json) 로드/저장 =====
-# 구조:
-# {
-#   "tags": { "테스트데이터_기사": 1000000, ... },
-#   "used": [1000000, ...],
-#   "_next": 1000004
-# }
+# ===== id_map.json 로드/저장 =====
+# 구조 예: { "tags": { "메인_코인": 1000004 }, "_next": 1000005 }
 def load_id_map() -> dict:
     if ID_MAP_PATH.exists():
         try:
             m = json.loads(ID_MAP_PATH.read_text(encoding="utf-8"))
             m.setdefault("tags", {})
-            m.setdefault("used", [])
             m.setdefault("_next", ID_START)
+            # 과거 파일에 "used"가 있어도 무시
+            m.pop("used", None)
             return m
         except Exception as e:
             log(f"[warn] failed to read {ID_MAP_PATH}: {e}; start fresh")
-    return {"tags": {}, "used": [], "_next": ID_START}
+    return {"tags": {}, "_next": ID_START}
 
 def save_id_map(idmap: dict):
+    # "used"는 더 이상 저장하지 않음
+    clean = {"tags": idmap.get("tags", {}), "_next": idmap.get("_next", ID_START)}
     ID_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ID_MAP_PATH.write_text(json.dumps(idmap, ensure_ascii=False, indent=2), encoding="utf-8")
-    log(f"[id-map] saved at {ID_MAP_PATH.resolve()} (tags={len(idmap.get('tags', {}))}, used={len(idmap.get('used', []))}, next={idmap.get('_next')})")
+    ID_MAP_PATH.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    log(f"[id-map] saved at {ID_MAP_PATH.resolve()} (tags={len(clean['tags'])}, next={clean['_next']})")
 
 def _alloc_next_free(idmap: dict) -> int:
-    used_tags_vals = {int(v) for v in idmap.get("tags", {}).values()}
-    used_numbers   = set(int(x) for x in idmap.get("used", []))
-    used_all       = used_tags_vals | used_numbers
+    # 새 번호는 '이미 태그로 배정된 값'만 피해서 배정
+    taken = {int(v) for v in idmap.get("tags", {}).values()}
     nxt = int(idmap.get("_next", ID_START))
-    while nxt in used_all:
+    while nxt in taken:
         nxt += 1
     idmap["_next"] = nxt + 1
     return nxt
 
 def _mark_used(idmap: dict, val: int):
-    val = int(val)
-    tags_vals = {int(v) for v in idmap.get("tags", {}).values()}
-    used_list = idmap.get("used", [])
-    if val not in tags_vals and val not in used_list:
-        used_list.append(val)
-        idmap["used"] = used_list
+    # 숫자 전역 중복 허용 → 기록 불필요
+    return
 
 def _must_int(v) -> int:
     if isinstance(v, int):
@@ -124,24 +116,20 @@ def _must_int(v) -> int:
 def map_token_to_global_id(idmap: dict, token: str) -> (int, bool):
     """
     token 이 "[태그]" 면 전역 tags에서 번호 반환(없으면 신규 배정) → (id, True)
-    token 이 숫자면 전역 used/tags와 충돌 없는지 검사 후 사용 → (id, False)
+    token 이 숫자면 전역 중복이어도 그대로 사용 → (id, False)
     """
     m = ID_TAG_RE.match(token)
     if m:
         tag = m.group(1).strip()
-        if tag in idmap["tags"]:
+        if tag in idmap.get("tags", {}):
             return int(idmap["tags"][tag]), True
         new_id = _alloc_next_free(idmap)
-        idmap["tags"][tag] = new_id
-        _mark_used(idmap, new_id)
+        idmap.setdefault("tags", {})[tag] = new_id
+        _mark_used(idmap, new_id)  # no-op
         return new_id, True
     else:
         val = _must_int(token)
-        tags_vals = {int(v) for v in idmap["tags"].values()}
-        used_vals = set(int(x) for x in idmap["used"])
-        if val in tags_vals or val in used_vals:
-            raise ValueError(f"[id-map] number {val} is already used globally")
-        _mark_used(idmap, val)
+        _mark_used(idmap, val)  # no-op
         return val, False
 
 # ===== 숫자형 컬럼 전역 매핑 적용 + ;id 마킹 =====
@@ -150,7 +138,7 @@ def resolve_placeholders_for_numeric_columns(df: pd.DataFrame, types: dict, idma
     모든 숫자형 컬럼(int/long):
       - "" → 0
       - "[태그]" → 전역 id_map으로 숫자 매핑(불변), 이 컬럼을 '매핑 컬럼'으로 기록
-      - 숫자 → 전역 충돌 검사 후 사용
+      - 숫자 → 그대로 사용(전역 중복 허용)
     매핑이 '실제로 발생한' 컬럼(types[col])에는 ';id' 꼬리표를 자동으로 붙인다.
     """
     numeric_bases = {"int", "long"}
@@ -161,19 +149,13 @@ def resolve_placeholders_for_numeric_columns(df: pd.DataFrame, types: dict, idma
         if base not in numeric_bases:
             continue
 
-        seen_in_df = set()
-
         def map_cell(x):
             s = "" if pd.isna(x) else str(x).strip()
             if s == "":
                 val, was_tag = 0, False
             else:
                 val, was_tag = map_token_to_global_id(idmap, s)
-            # 같은 DF 내 중복 방지
-            if val in seen_in_df:
-                raise ValueError(f"[id-map] duplicated value {val} within column '{col}' in this batch")
-            seen_in_df.add(val)
-            # 이 셀에서 태그 매핑이 실제 일어났다면 표시
+            # no per-column duplicate check
             if was_tag:
                 mapped_columns.add(col)
             return val
@@ -200,7 +182,6 @@ def convert_excel(file_path: pathlib.Path, idmap: dict):
                 continue
 
             types = build_types(header_row, type_row)
-
             resolve_placeholders_for_numeric_columns(df, types, idmap)
 
             df = df.fillna("")  # 빈칸 → ""
@@ -254,12 +235,9 @@ def collect_from_diff(diff_env: str):
         return tgt
     for line in diff_env.splitlines():
         q = pathlib.Path(line.strip()).resolve()
-        if not q.exists():
+        if not q.exists() or is_temp_excel(q.name):
             continue
-        if is_temp_excel(q.name):
-            continue
-        suf = q.suffix.lower()
-        if suf in EXCEL_EXTS or suf in CSV_EXTS:
+        if q.suffix.lower() in (EXCEL_EXTS | CSV_EXTS):
             tgt.append(q)
     return tgt
 
@@ -267,8 +245,7 @@ def collect_full():
     tgt = []
     for p in ROOT.rglob("*"):
         if p.is_file() and not is_temp_excel(p.name):
-            suf = p.suffix.lower()
-            if suf in EXCEL_EXTS or suf in CSV_EXTS:
+            if p.suffix.lower() in (EXCEL_EXTS | CSV_EXTS):
                 tgt.append(p.resolve())
     return tgt
 
@@ -281,7 +258,7 @@ def main():
     targets = collect_from_diff(diff) if diff else collect_full()
 
     idmap = load_id_map()
-    log(f"[id-map] loaded (tags={len(idmap.get('tags', {}))}, used={len(idmap.get('used', []))}, next={idmap.get('_next')})")
+    log(f"[id-map] loaded (tags={len(idmap.get('tags', {}))}, next={idmap.get('_next')})")
 
     if not targets and diff:
         log("[info] no targets from diff -> full repository scan")
