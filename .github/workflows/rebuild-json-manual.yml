@@ -59,7 +59,7 @@ jobs:
       # ---- 타깃 레포 준비 (수동 git) ----
       - name: Prepare JSON target repo
         env:
-          GH_TOKEN: ${{ secrets.JSON_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.LUNARIA_PAT }}
         run: |
           set -euxo pipefail
           rm -rf json-repo
@@ -103,7 +103,7 @@ jobs:
       - name: Commit & push
         working-directory: json-repo
         env:
-          GH_TOKEN: ${{ secrets.JSON_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.LUNARIA_PAT }}
         run: |
           set -euxo pipefail
           git status
