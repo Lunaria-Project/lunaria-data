@@ -15,6 +15,8 @@ env:
   JSON_REPO: Lunaria-Project/lunaria-data-json   # 결과 저장 레포
   JSON_BRANCH: main                               # 타깃 브랜치
   JSON_SUBDIR: data                               # 타깃 레포 내 하위 폴더
+  META_DIR: _meta
+  ID_MAP_BASENAME: id_map.json
 
 jobs:
   rebuild:
@@ -47,6 +49,31 @@ jobs:
           echo "[debug] planned files:"
           head -n 50 changed.txt || true
 
+      # ✅ 기존 id_map.json(있으면) 타깃 JSON 레포에서 가져오기
+      - name: Prefetch id_map.json from JSON repo (if exists)
+        env:
+          GH_TOKEN: ${{ secrets.LUNARIA_PAT }}
+        run: |
+          set -euxo pipefail
+          rm -rf prefetch
+          mkdir -p prefetch
+          cd prefetch
+          git init
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ env.JSON_REPO }}.git"
+          if git ls-remote --exit-code --heads origin ${{ env.JSON_BRANCH }}; then
+            git fetch origin ${{ env.JSON_BRANCH }} --depth=1
+            git checkout -B ${{ env.JSON_BRANCH }} FETCH_HEAD
+            if [ -f "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ]; then
+              cp "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ../id_map.json
+              echo "[prefetch] brought id_map.json → $(realpath ../id_map.json)"
+            else
+              echo "[prefetch] no existing id_map.json in JSON repo"
+            fi
+          else
+            echo "[prefetch] JSON branch not found; skipping"
+          fi
+          cd ..
+
       - name: Run converter (full rebuild)
         env:
           GIT_DIFF_FILES: ${{ env.GIT_DIFF_FILES }}
@@ -55,6 +82,8 @@ jobs:
           python scripts/convert_xlsx_to_json.py
           echo "[debug] json directory tree:"
           ls -R json || true
+          echo "[debug] id_map.json presence:"
+          [ -f id_map.json ] && ls -l id_map.json || echo "id_map.json NOT FOUND"
 
       # ---- 타깃 레포 준비 (수동 git) ----
       - name: Prepare JSON target repo
@@ -79,6 +108,7 @@ jobs:
             git commit -m "chore: initialize branch"
             git push -u origin ${{ env.JSON_BRANCH }}
           fi
+          cd ..
 
       # ✅ 폴더별 동기화: 각 루트(엑셀 파일명) 안에서만 --delete
       - name: Sync data folders (per-root, with delete)
@@ -96,6 +126,15 @@ jobs:
           for f in json/*.json ; do
             rsync -a "$f" "json-repo/${{ env.JSON_SUBDIR }}/"
           done
+
+          # ✅ id_map.json 스냅샷 반영
+          if [ -f id_map.json ]; then
+            mkdir -p "json-repo/${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}"
+            cp id_map.json "json-repo/${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}"
+            echo "[copy] wrote json-repo/${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}"
+          else
+            echo "[copy] id_map.json missing in workspace; nothing to copy"
+          fi
 
           echo "[debug] synced files:"
           find "json-repo/${{ env.JSON_SUBDIR }}" -type f -name "*.json" | sort | sed 's/^/  /'
