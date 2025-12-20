@@ -74,30 +74,131 @@ def append_id_marker(t: str) -> str:
     return ";".join(parts)
 
 # ===== id_map.json 로드/저장 =====
-# 구조 예: { "tags": { "메인_코인": 1000004 }, "_next": 1000005 }
+# (변경 후 저장 구조)
+# {
+#   "tags": [
+#     { "string": "메인_코인", "int": 1000004, "sheetName": "Sheet1", "columnName": "Id" },
+#     ...
+#   ],
+#   "_next": 1000005
+# }
+#
+# 내부 처리 편의를 위해 메모리에서는 아래를 유지:
+#   idmap["tags"]      : { string -> int }
+#   idmap["_origins"]  : { string -> {sheetName, columnName} }
+#   idmap["_next"]     : int
 def load_id_map() -> dict:
     if ID_MAP_PATH.exists():
         try:
-            m = json.loads(ID_MAP_PATH.read_text(encoding="utf-8"))
-            m.setdefault("tags", {})
-            m.setdefault("_next", ID_START)
-            # 과거 파일에 "used"가 있어도 무시
-            m.pop("used", None)
-            return m
+            raw = json.loads(ID_MAP_PATH.read_text(encoding="utf-8"))
+            raw.pop("used", None)
+
+            idmap = {"tags": {}, "_origins": {}, "_next": ID_START}
+
+            if isinstance(raw, dict):
+                # _next
+                try:
+                    idmap["_next"] = int(raw.get("_next", ID_START))
+                except Exception:
+                    idmap["_next"] = ID_START
+
+                tags = raw.get("tags")
+
+                # v1 호환: {"tags": { "K": 1 }}
+                if isinstance(tags, dict):
+                    for k, v in tags.items():
+                        if k is None:
+                            continue
+                        key = str(k).strip()
+                        if key == "":
+                            continue
+                        try:
+                            val = int(v)
+                        except Exception:
+                            continue
+                        idmap["tags"][key] = val
+                        if key not in idmap["_origins"]:
+                            idmap["_origins"][key] = {"sheetName": "UNKNOWN", "columnName": "UNKNOWN"}
+
+                # v2: {"tags": [ {"string":..., "int":..., "sheetName":..., "columnName":...}, ... ]}
+                elif isinstance(tags, list):
+                    for item in tags:
+                        if not isinstance(item, dict):
+                            continue
+                        key = str(item.get("string", "")).strip()
+                        if key == "":
+                            continue
+                        try:
+                            val = int(item.get("int"))
+                        except Exception:
+                            continue
+
+                        sheet_name = str(item.get("sheetName", "UNKNOWN")).strip() or "UNKNOWN"
+                        column_name = str(item.get("columnName", "UNKNOWN")).strip() or "UNKNOWN"
+
+                        idmap["tags"][key] = val
+                        existing = idmap["_origins"].get(key)
+                        if existing is None:
+                            idmap["_origins"][key] = {"sheetName": sheet_name, "columnName": column_name}
+                        else:
+                            # UNKNOWN보다 더 구체적인 정보가 들어오면 갱신
+                            if existing.get("sheetName") == "UNKNOWN" and sheet_name != "UNKNOWN":
+                                existing["sheetName"] = sheet_name
+                            if existing.get("columnName") == "UNKNOWN" and column_name != "UNKNOWN":
+                                existing["columnName"] = column_name
+
+                # tags가 없거나 이상한 경우
+                else:
+                    pass
+
+            return idmap
         except Exception as e:
             log(f"[warn] failed to read {ID_MAP_PATH}: {e}; start fresh")
-    return {"tags": {}, "_next": ID_START}
+
+    return {"tags": {}, "_origins": {}, "_next": ID_START}
 
 def save_id_map(idmap: dict):
-    # "used"는 더 이상 저장하지 않음
-    clean = {"tags": idmap.get("tags", {}), "_next": idmap.get("_next", ID_START)}
+    # tags를 list로 저장
+    tags_dict = idmap.get("tags", {})
+    origins = idmap.get("_origins", {})
+    next_val = idmap.get("_next", ID_START)
+
+    out_tags = []
+    if isinstance(tags_dict, dict):
+        # id 기준 정렬로 안정적인 출력
+        items = []
+        for k, v in tags_dict.items():
+            try:
+                items.append((str(k), int(v)))
+            except Exception:
+                continue
+        items.sort(key=lambda x: x[1])
+
+        for key, val in items:
+            origin = origins.get(key) if isinstance(origins, dict) else None
+            sheet_name = "UNKNOWN"
+            column_name = "UNKNOWN"
+            if isinstance(origin, dict):
+                sheet_name = str(origin.get("sheetName", "UNKNOWN")).strip() or "UNKNOWN"
+                column_name = str(origin.get("columnName", "UNKNOWN")).strip() or "UNKNOWN"
+
+            out_tags.append(
+                {
+                    "string": key,
+                    "int": val,
+                    "sheetName": sheet_name,
+                    "columnName": column_name,
+                }
+            )
+
+    clean = {"tags": out_tags, "_next": int(next_val)}
     ID_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
     ID_MAP_PATH.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-    log(f"[id-map] saved at {ID_MAP_PATH.resolve()} (tags={len(clean['tags'])}, next={clean['_next']})")
+    log(f"[id-map] saved at {ID_MAP_PATH.resolve()} (tags={len(out_tags)}, next={clean['_next']})")
 
 def _alloc_next_free(idmap: dict) -> int:
     # 새 번호는 '이미 태그로 배정된 값'만 피해서 배정
-    taken = {int(v) for v in idmap.get("tags", {}).values()}
+    taken = {int(v) for v in idmap.get("tags", {}).values()} if isinstance(idmap.get("tags"), dict) else set()
     nxt = int(idmap.get("_next", ID_START))
     while nxt in taken:
         nxt += 1
@@ -113,18 +214,49 @@ def _must_int(v) -> int:
         return v
     return int(float(str(v)))
 
-def map_token_to_global_id(idmap: dict, token: str) -> (int, bool):
+def _set_origin_if_needed(idmap: dict, tag: str, sheet_name: str, column_name: str):
+    origins = idmap.setdefault("_origins", {})
+    if not isinstance(origins, dict):
+        idmap["_origins"] = {}
+        origins = idmap["_origins"]
+
+    sheet_name = (sheet_name or "UNKNOWN").strip() or "UNKNOWN"
+    column_name = (column_name or "UNKNOWN").strip() or "UNKNOWN"
+
+    existing = origins.get(tag)
+    if existing is None:
+        origins[tag] = {"sheetName": sheet_name, "columnName": column_name}
+        return
+
+    if not isinstance(existing, dict):
+        origins[tag] = {"sheetName": sheet_name, "columnName": column_name}
+        return
+
+    # UNKNOWN 보다 구체 정보 우선
+    if existing.get("sheetName") == "UNKNOWN" and sheet_name != "UNKNOWN":
+        existing["sheetName"] = sheet_name
+    if existing.get("columnName") == "UNKNOWN" and column_name != "UNKNOWN":
+        existing["columnName"] = column_name
+
+def map_token_to_global_id(idmap: dict, token: str, sheet_name: str, column_name: str) -> (int, bool):
     """
     token 이 "[태그]" 면 전역 tags에서 번호 반환(없으면 신규 배정) → (id, True)
     token 이 숫자면 전역 중복이어도 그대로 사용 → (id, False)
+
+    ※ 변경점:
+      - 신규 태그를 배정하는 경우 sheet/column 출처를 _origins에 기록
+      - 기존 태그라도 출처가 UNKNOWN이면 보강
     """
     m = ID_TAG_RE.match(token)
     if m:
         tag = m.group(1).strip()
         if tag in idmap.get("tags", {}):
+            _set_origin_if_needed(idmap, tag, sheet_name, column_name)
             return int(idmap["tags"][tag]), True
+
         new_id = _alloc_next_free(idmap)
         idmap.setdefault("tags", {})[tag] = new_id
+        _set_origin_if_needed(idmap, tag, sheet_name, column_name)
         _mark_used(idmap, new_id)  # no-op
         return new_id, True
     else:
@@ -133,13 +265,16 @@ def map_token_to_global_id(idmap: dict, token: str) -> (int, bool):
         return val, False
 
 # ===== 숫자형 컬럼 전역 매핑 적용 + ;id 마킹 =====
-def resolve_placeholders_for_numeric_columns(df: pd.DataFrame, types: dict, idmap: dict):
+def resolve_placeholders_for_numeric_columns(df: pd.DataFrame, types: dict, idmap: dict, sheet_name: str):
     """
     모든 숫자형 컬럼(int/long):
       - "" → 0
       - "[태그]" → 전역 id_map으로 숫자 매핑(불변), 이 컬럼을 '매핑 컬럼'으로 기록
       - 숫자 → 그대로 사용(전역 중복 허용)
     매핑이 '실제로 발생한' 컬럼(types[col])에는 ';id' 꼬리표를 자동으로 붙인다.
+
+    ※ 변경점:
+      - map_token_to_global_id에 sheet_name/column_name 전달
     """
     numeric_bases = {"int", "long"}
     mapped_columns = set()
@@ -154,15 +289,13 @@ def resolve_placeholders_for_numeric_columns(df: pd.DataFrame, types: dict, idma
             if s == "":
                 val, was_tag = 0, False
             else:
-                val, was_tag = map_token_to_global_id(idmap, s)
-            # no per-column duplicate check
+                val, was_tag = map_token_to_global_id(idmap, s, sheet_name, str(col))
             if was_tag:
                 mapped_columns.add(col)
             return val
 
         df[col] = df[col].apply(map_cell).astype("int64")
 
-    # 매핑이 실제로 발생한 컬럼의 types에 ';id' 꼬리표 붙이기
     for col in mapped_columns:
         types[col] = append_id_marker(types.get(col, "int"))
 
@@ -182,7 +315,7 @@ def convert_excel(file_path: pathlib.Path, idmap: dict):
                 continue
 
             types = build_types(header_row, type_row)
-            resolve_placeholders_for_numeric_columns(df, types, idmap)
+            resolve_placeholders_for_numeric_columns(df, types, idmap, s)
 
             df = df.fillna("")  # 빈칸 → ""
 
@@ -216,7 +349,8 @@ def convert_csv(file_path: pathlib.Path, idmap: dict):
         header_row = header_row_df.iloc[0].tolist()
         types = build_types(header_row, type_row)
 
-        resolve_placeholders_for_numeric_columns(df, types, idmap)
+        # CSV는 시트 개념이 없어서 파일 stem을 sheetName으로 사용
+        resolve_placeholders_for_numeric_columns(df, types, idmap, file_path.stem)
 
         df = df.fillna("")
 
