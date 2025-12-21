@@ -39,35 +39,16 @@ def _iter_sheet_json_files(json_root: Path):
             yield rel.parts[0], p.stem, p
 
 
-def _read_json(path: Path, warnings: list[str]) -> dict | None:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        warnings.append(f"Failed to read json: {path} ({e})")
-        return None
-
-
-def _write_json(path: Path, data: dict, warnings: list[str]):
-    try:
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:
-        warnings.append(f"Failed to write json: {path} ({e})")
-
-
 def build_localdata_and_rewrite(json_root: Path, rewrite_json: bool):
-    warnings: list[str] = []
     localdata_rows: list[dict] = []
     localdata_json: dict[str, dict[str, str]] = {}
     seen_keys: set[str] = set()
-    rewritten_files = 0
 
     for file_stem, sheet_name, json_path in sorted(_iter_sheet_json_files(json_root)):
-        data = _read_json(json_path, warnings)
-        if data is None:
-            continue
-
+        data = json.loads(json_path.read_text(encoding="utf-8"))
         types = data.get("types")
         rows = data.get("rows")
+
         if not isinstance(types, dict) or not isinstance(rows, list):
             continue
 
@@ -80,113 +61,77 @@ def build_localdata_and_rewrite(json_root: Path, rewrite_json: bool):
             if _base_type(t) == _LOCAL_STRING_BASE
         ]
 
-        if not local_columns:
-            continue
-
-        modified = False
-
         for row_i, row in enumerate(rows):
-            if not isinstance(row, list):
-                continue
-
             for col, refs in local_columns:
-                col_idx = column_index.get(col)
-                if col_idx is None:
-                    continue
+                col_idx = column_index[col]
+                original = row[col_idx]
 
-                original = row[col_idx] if col_idx < len(row) else ""
-                if original in (None, ""):
+                if not original:
                     continue
 
                 key_parts = [file_stem, sheet_name]
 
                 if refs:
-                    missing = False
                     for ref in refs:
-                        ref_idx = column_index.get(ref)
-                        if ref_idx is None:
-                            warnings.append(f"[{file_stem}.{sheet_name}] unknown ref column '{ref}' in {json_path}")
-                            missing = True
-                            break
-                        ref_val = row[ref_idx] if ref_idx < len(row) else ""
-                        if ref_val in (None, ""):
-                            warnings.append(f"[{file_stem}.{sheet_name}] empty ref '{ref}' row {row_i} in {json_path}")
-                            missing = True
-                            break
-                        key_parts.append(str(ref_val).strip())
-                    if missing:
-                        continue
+                        key_parts.append(str(row[column_index[ref]]))
                 else:
                     key_parts.append(str(row_i + 1))
 
                 key = ".".join(key_parts)
 
-                # 이미 key로 치환되어 있으면 skip
-                if isinstance(original, str) and original.strip() == key:
-                    continue
-
-                # LocalData 기록 (첫 값 우선)
                 if key not in seen_keys:
                     seen_keys.add(key)
-                    ko_text = str(original)
-                    localdata_rows.append({"key": key, "ko": ko_text, "en": "", "ja": ""})
-                    localdata_json[key] = {"ko": ko_text, "en": "", "ja": ""}
-                else:
-                    warnings.append(f"Duplicate key skipped: {key} (from {json_path})")
+                    localdata_rows.append(
+                        {"key": key, "ko": original, "en": "", "ja": ""}
+                    )
+                    localdata_json[key] = {
+                        "ko": original,
+                        "en": "",
+                        "ja": "",
+                    }
 
-                # json 치환
                 if rewrite_json:
-                    while len(row) <= col_idx:
-                        row.append("")
                     row[col_idx] = key
-                    modified = True
 
-        if rewrite_json and modified:
-            _write_json(json_path, data, warnings)
-            rewritten_files += 1
+        if rewrite_json:
+            json_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
-    return localdata_rows, localdata_json, warnings, rewritten_files
+    return localdata_rows, localdata_json
 
 
 def main():
-    # allow_abbrev=False: --out 같은 약어로 --out_xlsx / --out_json을 추측하지 않게 막음
-    parser = argparse.ArgumentParser(allow_abbrev=False)
-
+    parser = argparse.ArgumentParser()
     parser.add_argument("--json_dir", default="json")
     parser.add_argument("--out_xlsx", default="LocalData.xlsx")
     parser.add_argument("--out_json", default="LocalData.json")
-
-    # 하위 호환: 예전 워크플로우가 --out LocalData.xlsx로 호출해도 동작하게
-    parser.add_argument("--out", dest="out_xlsx", help="Alias of --out_xlsx (legacy)")
-
     parser.add_argument("--rewrite_json", default="1")
     args = parser.parse_args()
 
-    rewrite = str(args.rewrite_json).strip().lower() not in ("0", "false", "no")
+    rewrite = args.rewrite_json != "0"
 
-    json_root = Path(args.json_dir).resolve()
-    out_xlsx = Path(args.out_xlsx).resolve()
-    out_json = Path(args.out_json).resolve()
+    rows, json_data = build_localdata_and_rewrite(
+        Path(args.json_dir), rewrite
+    )
 
-    rows, json_data, warnings, rewritten = build_localdata_and_rewrite(json_root, rewrite)
-
+    # 1) LocalData.xlsx
     df = pd.DataFrame(rows, columns=["key", "ko", "en", "ja"])
-    if not df.empty:
-        df.sort_values("key", inplace=True, kind="mergesort")
-
-    out_xlsx.parent.mkdir(parents=True, exist_ok=True)
-    with pd.ExcelWriter(out_xlsx, engine="openpyxl") as writer:
+    with pd.ExcelWriter(args.out_xlsx, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="LocalData")
 
-    out_json.parent.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(json.dumps(json_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 2) LocalData.json → data/LocalData/LocalData.json
+    localdata_dir = Path("data") / "LocalData"
+    localdata_dir.mkdir(parents=True, exist_ok=True)
 
-    if warnings:
-        warn_path = out_xlsx.with_suffix(".warnings.txt")
-        warn_path.write_text("\n".join(warnings), encoding="utf-8")
-        print(f"Wrote warnings: {warn_path}")
+    out_json_path = localdata_dir / "LocalData.json"
+    out_json_path.write_text(
+        json.dumps(json_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
-    print(f"Done. keys={len(json_data)} rewritten_files={rewritten} rewrite_json={rewrite}")
+    print(f"[OK] LocalData.json written to {out_json_path.resolve()}")
 
 
 if __name__ == "__main__":
