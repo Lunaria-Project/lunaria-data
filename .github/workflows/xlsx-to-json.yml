@@ -29,7 +29,8 @@ env:
   JSON_SUBDIR: data
   META_DIR: _meta
   ID_MAP_BASENAME: id_map.json
-  LOCALDATA_BASENAME: LocalData.xlsx
+  LOCALDATA_XLSX_BASENAME: LocalData.xlsx
+  LOCALDATA_JSON_BASENAME: LocalData.json
 
 jobs:
   export:
@@ -118,7 +119,7 @@ jobs:
           fi
           cd .
 
-      - name: Run converter (+ LocalData + rewrite json)
+      - name: Run converter (+ LocalData.xlsx + LocalData.json + rewrite json)
         env:
           GIT_DIFF_FILES: ${{ env.GIT_DIFF_FILES }}
           ID_START: "1000000"
@@ -128,13 +129,17 @@ jobs:
           # 1) XLSX/CSV -> json + id_map.json
           python scripts/convert_xlsx_to_json.py
 
-          # 2) json -> LocalData.xlsx + (rewrite json local_string cells -> key)
-          #    NOTE: scripts/localdata_from_json.py 는 rewrite 버전으로 교체되어 있어야 합니다.
-          python scripts/localdata_from_json.py --json_dir json --out "${{ env.LOCALDATA_BASENAME }}"
+          # 2) json -> LocalData.xlsx + LocalData.json + (rewrite json local_string cells -> key)
+          #    NOTE: scripts/localdata_from_json.py 는 (out_xlsx/out_json 옵션 있는 버전)이어야 합니다.
+          python scripts/localdata_from_json.py \
+            --json_dir json \
+            --out_xlsx "${{ env.LOCALDATA_XLSX_BASENAME }}" \
+            --out_json "${{ env.LOCALDATA_JSON_BASENAME }}"
 
           echo "[debug] json directory:"; ls -R json || true
           echo "[debug] id_map.json presence:"; [ -f id_map.json ] && ls -l id_map.json || echo "id_map.json NOT FOUND"
-          echo "[debug] LocalData.xlsx presence:"; [ -f "${{ env.LOCALDATA_BASENAME }}" ] && ls -l "${{ env.LOCALDATA_BASENAME }}" || echo "LocalData.xlsx NOT FOUND"
+          echo "[debug] LocalData.xlsx presence:"; [ -f "${{ env.LOCALDATA_XLSX_BASENAME }}" ] && ls -l "${{ env.LOCALDATA_XLSX_BASENAME }}" || echo "LocalData.xlsx NOT FOUND"
+          echo "[debug] LocalData.json presence:"; [ -f "${{ env.LOCALDATA_JSON_BASENAME }}" ] && ls -l "${{ env.LOCALDATA_JSON_BASENAME }}" || echo "LocalData.json NOT FOUND"
           echo "[debug] LocalData warnings presence:"; [ -f LocalData.warnings.txt ] && ls -l LocalData.warnings.txt || echo "LocalData.warnings.txt NOT FOUND"
 
       - name: Upload artifact (PR only)
@@ -146,6 +151,7 @@ jobs:
             json
             id_map.json
             LocalData.xlsx
+            LocalData.json
             LocalData.warnings.txt
 
       - name: Prepare JSON target repo
@@ -204,12 +210,21 @@ jobs:
           fi
 
           # LocalData.xlsx 스냅샷 반영
-          if [ -f ../${{ env.LOCALDATA_BASENAME }} ]; then
+          if [ -f ../${{ env.LOCALDATA_XLSX_BASENAME }} ]; then
             mkdir -p "$JSON_SUBDIR/$META_DIR"
-            cp ../${{ env.LOCALDATA_BASENAME }} "$JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_BASENAME }}"
-            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_BASENAME }}"
+            cp ../${{ env.LOCALDATA_XLSX_BASENAME }} "$JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_XLSX_BASENAME }}"
+            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_XLSX_BASENAME }}"
           else
             echo "[copy] LocalData.xlsx missing in workspace; nothing to copy"
+          fi
+
+          # LocalData.json 스냅샷 반영
+          if [ -f ../${{ env.LOCALDATA_JSON_BASENAME }} ]; then
+            mkdir -p "$JSON_SUBDIR/$META_DIR"
+            cp ../${{ env.LOCALDATA_JSON_BASENAME }} "$JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_JSON_BASENAME }}"
+            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_JSON_BASENAME }}"
+          else
+            echo "[copy] LocalData.json missing in workspace; nothing to copy"
           fi
 
           # LocalData 경고 파일(있으면) 반영
