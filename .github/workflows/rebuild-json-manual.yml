@@ -1,4 +1,4 @@
-name: Rebuild JSON (manual)
+name: Rebuild JSON (manual - full)
 
 on:
   workflow_dispatch:
@@ -12,11 +12,17 @@ permissions:
   contents: read
 
 env:
-  JSON_REPO: Lunaria-Project/lunaria-data-json   # 결과 저장 레포
-  JSON_BRANCH: main                               # 타깃 브랜치
-  JSON_SUBDIR: data                               # 타깃 레포 내 하위 폴더
+  JSON_REPO: Lunaria-Project/lunaria-data-json
+  JSON_BRANCH: main
+  JSON_SUBDIR: data
   META_DIR: _meta
   ID_MAP_BASENAME: id_map.json
+
+  LOCALDATA_XLSX_BASENAME: LocalData.xlsx
+  # localdata_from_json.py가 실제로 생성하는 위치(워크스페이스 기준)
+  LOCALDATA_JSON_WORKSPACE_PATH: data/LocalData/LocalData.json
+  # localdata_from_json.py 인자로 넘길 파일명(스크립트가 경로를 강제한다면 이름만 중요)
+  LOCALDATA_JSON_BASENAME: LocalData.json
 
 jobs:
   rebuild:
@@ -38,18 +44,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ✅ 항상 전체 스캔으로 변환 대상 지정
-      - name: Force full scan
+      - name: Force full scan (all data files)
         run: |
           set -euxo pipefail
-          git ls-files > changed.txt
+          # convert_xlsx_to_json.py가 GIT_DIFF_FILES를 참고한다면,
+          # 여기서는 "전체 데이터 파일"을 강제로 넣어줍니다.
+          git ls-files | grep -E '\.(xlsx|xlsm|xls|csv)$' > changed.txt || true
+          if [ ! -s changed.txt ]; then
+            # 혹시 확장자 필터에 걸리는 게 없다면, 그래도 전체 스캔하도록 전체 파일을 넣습니다.
+            git ls-files > changed.txt
+          fi
+
           echo "GIT_DIFF_FILES<<EOF" >> $GITHUB_ENV
           cat changed.txt >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
-          echo "[debug] planned files:"
-          head -n 50 changed.txt || true
 
-      # ✅ 기존 id_map.json(있으면) 타깃 JSON 레포에서 가져오기
+          echo "[debug] full scan targets (top 100):"
+          head -n 100 changed.txt || true
+
       - name: Prefetch id_map.json from JSON repo (if exists)
         env:
           GH_TOKEN: ${{ secrets.LUNARIA_PAT }}
@@ -74,18 +86,31 @@ jobs:
           fi
           cd ..
 
-      - name: Run converter (full rebuild)
+      - name: Rebuild all JSON + LocalData (full)
         env:
           GIT_DIFF_FILES: ${{ env.GIT_DIFF_FILES }}
+          ID_START: "1000000"
         run: |
           set -euxo pipefail
-          python scripts/convert_xlsx_to_json.py
-          echo "[debug] json directory tree:"
-          ls -R json || true
-          echo "[debug] id_map.json presence:"
-          [ -f id_map.json ] && ls -l id_map.json || echo "id_map.json NOT FOUND"
 
-      # ---- 타깃 레포 준비 (수동 git) ----
+          # 1) 전체 데이터 -> json + id_map.json
+          python scripts/convert_xlsx_to_json.py
+
+          # 2) local_string -> key rewrite + LocalData.xlsx + data/LocalData/LocalData.json
+          python scripts/localdata_from_json.py \
+            --json_dir json \
+            --out_xlsx "${{ env.LOCALDATA_XLSX_BASENAME }}" \
+            --out_json "${{ env.LOCALDATA_JSON_BASENAME }}"
+
+          echo "[debug] LocalData.xlsx presence:"
+          [ -f "${{ env.LOCALDATA_XLSX_BASENAME }}" ] && ls -l "${{ env.LOCALDATA_XLSX_BASENAME }}" || echo "LocalData.xlsx NOT FOUND"
+
+          echo "[debug] LocalData.json presence:"
+          [ -f "${{ env.LOCALDATA_JSON_WORKSPACE_PATH }}" ] && ls -l "${{ env.LOCALDATA_JSON_WORKSPACE_PATH }}" || echo "${{ env.LOCALDATA_JSON_WORKSPACE_PATH }} NOT FOUND"
+
+          echo "[debug] LocalData.warnings presence:"
+          [ -f LocalData.warnings.txt ] && ls -l LocalData.warnings.txt || echo "LocalData.warnings.txt NOT FOUND"
+
       - name: Prepare JSON target repo
         env:
           GH_TOKEN: ${{ secrets.LUNARIA_PAT }}
@@ -110,53 +135,76 @@ jobs:
           fi
           cd ..
 
-      # ✅ 폴더별 동기화: 각 루트(엑셀 파일명) 안에서만 --delete
-      - name: Sync data folders (per-root, with delete)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p "json-repo/${{ env.JSON_SUBDIR }}"
-          shopt -s nullglob
-          for d in json/*/ ; do
-            base="$(basename "$d")"
-            mkdir -p "json-repo/${{ env.JSON_SUBDIR }}/${base}"
-            rsync -a --delete "$d" "json-repo/${{ env.JSON_SUBDIR }}/${base}/"
-          done
-          # 루트 직하 JSON이 있으면 복사(거의 없지만 대비)
-          for f in json/*.json ; do
-            rsync -a "$f" "json-repo/${{ env.JSON_SUBDIR }}/"
-          done
-
-          # ✅ id_map.json 스냅샷 반영
-          if [ -f id_map.json ]; then
-            mkdir -p "json-repo/${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}"
-            cp id_map.json "json-repo/${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}"
-            echo "[copy] wrote json-repo/${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}"
-          else
-            echo "[copy] id_map.json missing in workspace; nothing to copy"
-          fi
-
-          echo "[debug] synced files:"
-          find "json-repo/${{ env.JSON_SUBDIR }}" -type f -name "*.json" | sort | sed 's/^/  /'
-
-      - name: Commit & push
+      - name: Copy, commit & push (full sync)
         working-directory: json-repo
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.LUNARIA_PAT }}
         run: |
           set -euxo pipefail
-          git status
+          git config --global --add safe.directory "$PWD"
+
+          mkdir -p "$JSON_SUBDIR"
+          shopt -s nullglob
+
+          # ✅ json 폴더 전체 동기화 (delete 포함)
+          for d in ../json/*/ ; do
+            base="$(basename "$d")"
+            mkdir -p "$JSON_SUBDIR/$base"
+            rsync -a --delete "$d" "$JSON_SUBDIR/$base/"
+          done
+          for f in ../json/*.json ; do
+            rsync -a "$f" "$JSON_SUBDIR/"
+          done
+
+          # ✅ id_map.json -> data/_meta/id_map.json
+          if [ -f ../id_map.json ]; then
+            mkdir -p "$JSON_SUBDIR/$META_DIR"
+            cp ../id_map.json "$JSON_SUBDIR/$META_DIR/$ID_MAP_BASENAME"
+            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/$ID_MAP_BASENAME"
+          else
+            echo "[copy] id_map.json missing; nothing to copy"
+          fi
+
+          # ✅ LocalData.xlsx -> data/_meta/LocalData.xlsx
+          if [ -f ../${{ env.LOCALDATA_XLSX_BASENAME }} ]; then
+            mkdir -p "$JSON_SUBDIR/$META_DIR"
+            cp ../${{ env.LOCALDATA_XLSX_BASENAME }} "$JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_XLSX_BASENAME }}"
+            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_XLSX_BASENAME }}"
+          else
+            echo "[copy] LocalData.xlsx missing; nothing to copy"
+          fi
+
+          # ✅ LocalData.json -> data/LocalData/LocalData.json
+          if [ -f ../${{ env.LOCALDATA_JSON_WORKSPACE_PATH }} ]; then
+            mkdir -p "$JSON_SUBDIR/LocalData"
+            cp ../${{ env.LOCALDATA_JSON_WORKSPACE_PATH }} "$JSON_SUBDIR/LocalData/LocalData.json"
+            echo "[copy] wrote $JSON_SUBDIR/LocalData/LocalData.json"
+          else
+            echo "[copy] LocalData.json missing: ../${{ env.LOCALDATA_JSON_WORKSPACE_PATH }}"
+            (cd .. && find . -maxdepth 4 -name "LocalData.json" -print) || true
+          fi
+
+          # ✅ warnings -> data/_meta/LocalData.warnings.txt
+          if [ -f ../LocalData.warnings.txt ]; then
+            mkdir -p "$JSON_SUBDIR/$META_DIR"
+            cp ../LocalData.warnings.txt "$JSON_SUBDIR/$META_DIR/LocalData.warnings.txt"
+            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/LocalData.warnings.txt"
+          else
+            echo "[copy] LocalData.warnings.txt missing; nothing to copy"
+          fi
+
+          echo "[debug] files to commit (top 100):"
+          git status --porcelain | head -n 100
+
           if [ -n "$(git status --porcelain)" ]; then
             git add -A
             REASON="${{ github.event.inputs.reason }}"
-            # 커밋 메시지: [실행자] : manual rebuild (optional reason)
             if [ -n "$REASON" ]; then
-              MSG="[${{ github.actor }}] : manual rebuild - $REASON"
+              git commit -m "[${{ github.actor }}] : manual full rebuild - ${REASON}"
             else
-              MSG="[${{ github.actor }}] : manual rebuild"
+              git commit -m "[${{ github.actor }}] : manual full rebuild"
             fi
-            git commit -m "$MSG"
             git push origin HEAD:${{ env.JSON_BRANCH }}
           else
             echo "No changes to push."
-          fi
