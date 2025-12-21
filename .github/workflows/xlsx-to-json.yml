@@ -29,7 +29,13 @@ env:
   JSON_SUBDIR: data
   META_DIR: _meta
   ID_MAP_BASENAME: id_map.json
+
   LOCALDATA_XLSX_BASENAME: LocalData.xlsx
+
+  # localdata_from_json.py가 실제로 생성하는 위치(워크스페이스 기준)
+  LOCALDATA_JSON_WORKSPACE_PATH: data/LocalData/LocalData.json
+
+  # (레거시 유지: localdata_from_json.py 실행 인자는 그대로 "LocalData.json" 넘겨도 됨)
   LOCALDATA_JSON_BASENAME: LocalData.json
 
 jobs:
@@ -129,8 +135,7 @@ jobs:
           # 1) XLSX/CSV -> json + id_map.json
           python scripts/convert_xlsx_to_json.py
 
-          # 2) json -> LocalData.xlsx + LocalData.json + (rewrite json local_string cells -> key)
-          #    NOTE: scripts/localdata_from_json.py 는 (out_xlsx/out_json 옵션 있는 버전)이어야 합니다.
+          # 2) json -> LocalData.xlsx + (data/LocalData/LocalData.json) + rewrite json local_string cells -> key
           python scripts/localdata_from_json.py \
             --json_dir json \
             --out_xlsx "${{ env.LOCALDATA_XLSX_BASENAME }}" \
@@ -139,7 +144,10 @@ jobs:
           echo "[debug] json directory:"; ls -R json || true
           echo "[debug] id_map.json presence:"; [ -f id_map.json ] && ls -l id_map.json || echo "id_map.json NOT FOUND"
           echo "[debug] LocalData.xlsx presence:"; [ -f "${{ env.LOCALDATA_XLSX_BASENAME }}" ] && ls -l "${{ env.LOCALDATA_XLSX_BASENAME }}" || echo "LocalData.xlsx NOT FOUND"
-          echo "[debug] LocalData.json presence:"; [ -f "${{ env.LOCALDATA_JSON_BASENAME }}" ] && ls -l "${{ env.LOCALDATA_JSON_BASENAME }}" || echo "LocalData.json NOT FOUND"
+
+          echo "[debug] LocalData.json presence:"
+          [ -f "${{ env.LOCALDATA_JSON_WORKSPACE_PATH }}" ] && ls -l "${{ env.LOCALDATA_JSON_WORKSPACE_PATH }}" || echo "${{ env.LOCALDATA_JSON_WORKSPACE_PATH }} NOT FOUND"
+
           echo "[debug] LocalData warnings presence:"; [ -f LocalData.warnings.txt ] && ls -l LocalData.warnings.txt || echo "LocalData.warnings.txt NOT FOUND"
 
       - name: Upload artifact (PR only)
@@ -151,7 +159,7 @@ jobs:
             json
             id_map.json
             LocalData.xlsx
-            LocalData.json
+            data/LocalData/LocalData.json
             LocalData.warnings.txt
 
       - name: Prepare JSON target repo
@@ -209,7 +217,7 @@ jobs:
             echo "[copy] id_map.json missing in workspace; nothing to copy"
           fi
 
-          # LocalData.xlsx 스냅샷 반영
+          # LocalData.xlsx 스냅샷 반영 (data/_meta/LocalData.xlsx)
           if [ -f ../${{ env.LOCALDATA_XLSX_BASENAME }} ]; then
             mkdir -p "$JSON_SUBDIR/$META_DIR"
             cp ../${{ env.LOCALDATA_XLSX_BASENAME }} "$JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_XLSX_BASENAME }}"
@@ -218,11 +226,11 @@ jobs:
             echo "[copy] LocalData.xlsx missing in workspace; nothing to copy"
           fi
 
-          # LocalData.json 스냅샷 반영
-          if [ -f ../${{ env.LOCALDATA_JSON_BASENAME }} ]; then
-            mkdir -p "$JSON_SUBDIR/$META_DIR"
-            cp ../${{ env.LOCALDATA_JSON_BASENAME }} "$JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_JSON_BASENAME }}"
-            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_JSON_BASENAME }}"
+          # ✅ LocalData.json 스냅샷 반영: (workspace) data/LocalData/LocalData.json -> (target) data/LocalData/LocalData.json
+          if [ -f ../${{ env.LOCALDATA_JSON_WORKSPACE_PATH }} ]; then
+            mkdir -p "$JSON_SUBDIR/LocalData"
+            cp ../${{ env.LOCALDATA_JSON_WORKSPACE_PATH }} "$JSON_SUBDIR/LocalData/LocalData.json"
+            echo "[copy] wrote $JSON_SUBDIR/LocalData/LocalData.json"
           else
             echo "[copy] LocalData.json missing in workspace; nothing to copy"
           fi
