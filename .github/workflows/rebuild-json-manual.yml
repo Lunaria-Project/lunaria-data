@@ -19,9 +19,7 @@ env:
   ID_MAP_BASENAME: id_map.json
 
   LOCALDATA_XLSX_BASENAME: LocalData.xlsx
-  # localdata_from_json.py가 실제로 생성하는 위치(워크스페이스 기준)
   LOCALDATA_JSON_WORKSPACE_PATH: data/LocalData/LocalData.json
-  # localdata_from_json.py 인자로 넘길 파일명(스크립트가 경로를 강제한다면 이름만 중요)
   LOCALDATA_JSON_BASENAME: LocalData.json
 
 jobs:
@@ -41,23 +39,21 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euxo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Force full scan (all data files)
         run: |
           set -euxo pipefail
-          # convert_xlsx_to_json.py가 GIT_DIFF_FILES를 참고한다면,
-          # 여기서는 "전체 데이터 파일"을 강제로 넣어줍니다.
           git ls-files | grep -E '\.(xlsx|xlsm|xls|csv)$' > changed.txt || true
           if [ ! -s changed.txt ]; then
-            # 혹시 확장자 필터에 걸리는 게 없다면, 그래도 전체 스캔하도록 전체 파일을 넣습니다.
             git ls-files > changed.txt
           fi
 
-          echo "GIT_DIFF_FILES<<EOF" >> $GITHUB_ENV
-          cat changed.txt >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          echo "GIT_DIFF_FILES<<EOF" >> "$GITHUB_ENV"
+          cat changed.txt >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
 
           echo "[debug] full scan targets (top 100):"
           head -n 100 changed.txt || true
@@ -72,9 +68,11 @@ jobs:
           cd prefetch
           git init
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ env.JSON_REPO }}.git"
-          if git ls-remote --exit-code --heads origin ${{ env.JSON_BRANCH }}; then
-            git fetch origin ${{ env.JSON_BRANCH }} --depth=1
-            git checkout -B ${{ env.JSON_BRANCH }} FETCH_HEAD
+
+          if git ls-remote --exit-code --heads origin "${{ env.JSON_BRANCH }}"; then
+            git fetch origin "${{ env.JSON_BRANCH }}" --depth=1
+            git checkout -B "${{ env.JSON_BRANCH }}" FETCH_HEAD
+
             if [ -f "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ]; then
               cp "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ../id_map.json
               echo "[prefetch] brought id_map.json → $(realpath ../id_map.json)"
@@ -84,7 +82,6 @@ jobs:
           else
             echo "[prefetch] JSON branch not found; skipping"
           fi
-          cd ..
 
       - name: Rebuild all JSON + LocalData (full)
         env:
@@ -93,10 +90,8 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # 1) 전체 데이터 -> json + id_map.json
           python scripts/convert_xlsx_to_json.py
 
-          # 2) local_string -> key rewrite + LocalData.xlsx + data/LocalData/LocalData.json
           python scripts/localdata_from_json.py \
             --json_dir json \
             --out_xlsx "${{ env.LOCALDATA_XLSX_BASENAME }}" \
@@ -123,17 +118,17 @@ jobs:
           git config user.name "json-export-bot"
           git config user.email "json-export-bot@users.noreply.github.com"
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ env.JSON_REPO }}.git"
-          if git ls-remote --exit-code --heads origin ${{ env.JSON_BRANCH }}; then
-            git fetch origin ${{ env.JSON_BRANCH }} --depth=1
-            git checkout -B ${{ env.JSON_BRANCH }} FETCH_HEAD
+
+          if git ls-remote --exit-code --heads origin "${{ env.JSON_BRANCH }}"; then
+            git fetch origin "${{ env.JSON_BRANCH }}" --depth=1
+            git checkout -B "${{ env.JSON_BRANCH }}" FETCH_HEAD
           else
-            git checkout --orphan ${{ env.JSON_BRANCH }}
+            git checkout --orphan "${{ env.JSON_BRANCH }}"
             echo "{}" > .init.json
             git add .init.json
             git commit -m "chore: initialize branch"
-            git push -u origin ${{ env.JSON_BRANCH }}
+            git push -u origin "${{ env.JSON_BRANCH }}"
           fi
-          cd ..
 
       - name: Copy, commit & push (full sync)
         working-directory: json-repo
@@ -144,67 +139,71 @@ jobs:
           set -euxo pipefail
           git config --global --add safe.directory "$PWD"
 
-          mkdir -p "$JSON_SUBDIR"
+          mkdir -p "${JSON_SUBDIR}"
           shopt -s nullglob
 
-          # ✅ json 폴더 전체 동기화 (delete 포함)
+          # 1) json 폴더 전체 동기화 (delete 포함)
           for d in ../json/*/ ; do
             base="$(basename "$d")"
-            mkdir -p "$JSON_SUBDIR/$base"
-            rsync -a --delete "$d" "$JSON_SUBDIR/$base/"
-          done
-          for f in ../json/*.json ; do
-            rsync -a "$f" "$JSON_SUBDIR/"
+            mkdir -p "${JSON_SUBDIR}/${base}"
+            rsync -a --delete "${d}" "${JSON_SUBDIR}/${base}/"
           done
 
-          # ✅ id_map.json -> data/_meta/id_map.json
+          for f in ../json/*.json ; do
+            rsync -a "${f}" "${JSON_SUBDIR}/"
+          done
+
+          # 2) id_map.json -> data/_meta/id_map.json
           if [ -f ../id_map.json ]; then
-            mkdir -p "$JSON_SUBDIR/$META_DIR"
-            cp ../id_map.json "$JSON_SUBDIR/$META_DIR/$ID_MAP_BASENAME"
-            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/$ID_MAP_BASENAME"
+            mkdir -p "${JSON_SUBDIR}/${META_DIR}"
+            cp ../id_map.json "${JSON_SUBDIR}/${META_DIR}/${ID_MAP_BASENAME}"
+            echo "[copy] wrote ${JSON_SUBDIR}/${META_DIR}/${ID_MAP_BASENAME}"
           else
             echo "[copy] id_map.json missing; nothing to copy"
           fi
 
-          # ✅ LocalData.xlsx -> data/_meta/LocalData.xlsx
-          if [ -f ../${{ env.LOCALDATA_XLSX_BASENAME }} ]; then
-            mkdir -p "$JSON_SUBDIR/$META_DIR"
-            cp ../${{ env.LOCALDATA_XLSX_BASENAME }} "$JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_XLSX_BASENAME }}"
-            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_XLSX_BASENAME }}"
+          # 3) LocalData.xlsx -> data/_meta/LocalData.xlsx
+          if [ -f "../${LOCALDATA_XLSX_BASENAME}" ]; then
+            mkdir -p "${JSON_SUBDIR}/${META_DIR}"
+            cp "../${LOCALDATA_XLSX_BASENAME}" "${JSON_SUBDIR}/${META_DIR}/${LOCALDATA_XLSX_BASENAME}"
+            echo "[copy] wrote ${JSON_SUBDIR}/${META_DIR}/${LOCALDATA_XLSX_BASENAME}"
           else
             echo "[copy] LocalData.xlsx missing; nothing to copy"
           fi
 
-          # ✅ LocalData.json -> data/LocalData/LocalData.json
-          if [ -f ../${{ env.LOCALDATA_JSON_WORKSPACE_PATH }} ]; then
-            mkdir -p "$JSON_SUBDIR/LocalData"
-            cp ../${{ env.LOCALDATA_JSON_WORKSPACE_PATH }} "$JSON_SUBDIR/LocalData/LocalData.json"
-            echo "[copy] wrote $JSON_SUBDIR/LocalData/LocalData.json"
+          # 4) LocalData.json -> data/LocalData/LocalData.json
+          if [ -f "../${LOCALDATA_JSON_WORKSPACE_PATH}" ]; then
+            mkdir -p "${JSON_SUBDIR}/LocalData"
+            cp "../${LOCALDATA_JSON_WORKSPACE_PATH}" "${JSON_SUBDIR}/LocalData/LocalData.json"
+            echo "[copy] wrote ${JSON_SUBDIR}/LocalData/LocalData.json"
           else
-            echo "[copy] LocalData.json missing: ../${{ env.LOCALDATA_JSON_WORKSPACE_PATH }}"
+            echo "[copy] LocalData.json missing: ../${LOCALDATA_JSON_WORKSPACE_PATH}"
             (cd .. && find . -maxdepth 4 -name "LocalData.json" -print) || true
           fi
 
-          # ✅ warnings -> data/_meta/LocalData.warnings.txt
+          # 5) warnings -> data/_meta/LocalData.warnings.txt
           if [ -f ../LocalData.warnings.txt ]; then
-            mkdir -p "$JSON_SUBDIR/$META_DIR"
-            cp ../LocalData.warnings.txt "$JSON_SUBDIR/$META_DIR/LocalData.warnings.txt"
-            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/LocalData.warnings.txt"
+            mkdir -p "${JSON_SUBDIR}/${META_DIR}"
+            cp ../LocalData.warnings.txt "${JSON_SUBDIR}/${META_DIR}/LocalData.warnings.txt"
+            echo "[copy] wrote ${JSON_SUBDIR}/${META_DIR}/LocalData.warnings.txt"
           else
             echo "[copy] LocalData.warnings.txt missing; nothing to copy"
           fi
 
-          echo "[debug] files to commit (top 100):"
-          git status --porcelain | head -n 100
+          echo "[debug] status:"
+          git status --porcelain | head -n 200 || true
 
           if [ -n "$(git status --porcelain)" ]; then
             git add -A
-            REASON="${{ github.event.inputs.reason }}"
-            if [ -n "$REASON" ]; then
-              git commit -m "[${{ github.actor }}] : manual full rebuild - ${REASON}"
+
+            reason="${{ github.event.inputs.reason }}"
+            if [ -n "${reason}" ]; then
+              git commit -m "[${{ github.actor }}] : manual full rebuild - ${reason}"
             else
               git commit -m "[${{ github.actor }}] : manual full rebuild"
             fi
-            git push origin HEAD:${{ env.JSON_BRANCH }}
+
+            git push origin "HEAD:${{ env.JSON_BRANCH }}"
           else
             echo "No changes to push."
+          fi
