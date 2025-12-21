@@ -118,7 +118,7 @@ jobs:
           fi
           cd .
 
-      - name: Run converter (+ LocalData)
+      - name: Run converter (+ LocalData + rewrite json)
         env:
           GIT_DIFF_FILES: ${{ env.GIT_DIFF_FILES }}
           ID_START: "1000000"
@@ -128,7 +128,8 @@ jobs:
           # 1) XLSX/CSV -> json + id_map.json
           python scripts/convert_xlsx_to_json.py
 
-          # 2) json -> LocalData.xlsx
+          # 2) json -> LocalData.xlsx + (rewrite json local_string cells -> key)
+          #    NOTE: scripts/localdata_from_json.py 는 rewrite 버전으로 교체되어 있어야 합니다.
           python scripts/localdata_from_json.py --json_dir json --out "${{ env.LOCALDATA_BASENAME }}"
 
           echo "[debug] json directory:"; ls -R json || true
