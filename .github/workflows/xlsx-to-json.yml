@@ -8,6 +8,7 @@ on:
       - "**/*.xls"
       - "**/*.csv"
       - "scripts/convert_xlsx_to_json.py"
+      - "scripts/localdata_from_json.py"
       - "requirements.txt"
   pull_request:
     paths:
@@ -16,6 +17,7 @@ on:
       - "**/*.xls"
       - "**/*.csv"
       - "scripts/convert_xlsx_to_json.py"
+      - "scripts/localdata_from_json.py"
       - "requirements.txt"
 
 permissions:
@@ -27,6 +29,7 @@ env:
   JSON_SUBDIR: data
   META_DIR: _meta
   ID_MAP_BASENAME: id_map.json
+  LOCALDATA_BASENAME: LocalData.xlsx
 
 jobs:
   export:
@@ -105,25 +108,33 @@ jobs:
             git fetch origin ${{ env.JSON_BRANCH }} --depth=1
             git checkout -B ${{ env.JSON_BRANCH }} FETCH_HEAD
             if [ -f "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ]; then
-              cp "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ../id_map.json
-              echo "[prefetch] brought id_map.json → $(realpath ../id_map.json)"
+              cp "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ./id_map.json
+              echo "[prefetch] brought id_map.json → $(realpath ./id_map.json)"
             else
               echo "[prefetch] no existing id_map.json in JSON repo"
             fi
           else
             echo "[prefetch] JSON branch not found; skipping"
           fi
-          cd ..
+          cd .
 
-      - name: Run converter
+      - name: Run converter (+ LocalData)
         env:
           GIT_DIFF_FILES: ${{ env.GIT_DIFF_FILES }}
           ID_START: "1000000"
         run: |
           set -euxo pipefail
+
+          # 1) XLSX/CSV -> json + id_map.json
           python scripts/convert_xlsx_to_json.py
+
+          # 2) json -> LocalData.xlsx
+          python scripts/localdata_from_json.py --json_dir json --out "${{ env.LOCALDATA_BASENAME }}"
+
           echo "[debug] json directory:"; ls -R json || true
           echo "[debug] id_map.json presence:"; [ -f id_map.json ] && ls -l id_map.json || echo "id_map.json NOT FOUND"
+          echo "[debug] LocalData.xlsx presence:"; [ -f "${{ env.LOCALDATA_BASENAME }}" ] && ls -l "${{ env.LOCALDATA_BASENAME }}" || echo "LocalData.xlsx NOT FOUND"
+          echo "[debug] LocalData warnings presence:"; [ -f LocalData.warnings.txt ] && ls -l LocalData.warnings.txt || echo "LocalData.warnings.txt NOT FOUND"
 
       - name: Upload artifact (PR only)
         if: ${{ github.event_name == 'pull_request' }}
@@ -133,6 +144,8 @@ jobs:
           path: |
             json
             id_map.json
+            LocalData.xlsx
+            LocalData.warnings.txt
 
       - name: Prepare JSON target repo
         if: ${{ github.event_name == 'push' }}
@@ -157,7 +170,7 @@ jobs:
             git commit -m "chore: initialize branch"
             git push -u origin ${{ env.JSON_BRANCH }}
           fi
-          cd ..
+          cd .
 
       - name: Copy, commit & push JSON to target repo
         if: ${{ github.event_name == 'push' }}
@@ -187,6 +200,24 @@ jobs:
             echo "[copy] wrote $JSON_SUBDIR/$META_DIR/$ID_MAP_BASENAME"
           else
             echo "[copy] id_map.json missing in workspace; nothing to copy"
+          fi
+
+          # LocalData.xlsx 스냅샷 반영
+          if [ -f ../${{ env.LOCALDATA_BASENAME }} ]; then
+            mkdir -p "$JSON_SUBDIR/$META_DIR"
+            cp ../${{ env.LOCALDATA_BASENAME }} "$JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_BASENAME }}"
+            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_BASENAME }}"
+          else
+            echo "[copy] LocalData.xlsx missing in workspace; nothing to copy"
+          fi
+
+          # LocalData 경고 파일(있으면) 반영
+          if [ -f ../LocalData.warnings.txt ]; then
+            mkdir -p "$JSON_SUBDIR/$META_DIR"
+            cp ../LocalData.warnings.txt "$JSON_SUBDIR/$META_DIR/LocalData.warnings.txt"
+            echo "[copy] wrote $JSON_SUBDIR/$META_DIR/LocalData.warnings.txt"
+          else
+            echo "[copy] LocalData.warnings.txt missing in workspace; nothing to copy"
           fi
 
           echo "[debug] files to commit (top 50):"
