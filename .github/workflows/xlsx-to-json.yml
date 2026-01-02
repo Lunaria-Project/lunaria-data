@@ -100,7 +100,7 @@ jobs:
             echo "EOF" >> $GITHUB_ENV
           fi
 
-      - name: Prefetch id_map.json from JSON repo (if exists)
+      -- name: Prefetch id_map.json from JSON repo (if exists)
         if: ${{ github.event_name == 'push' }}
         env:
           GH_TOKEN: ${{ secrets.LUNARIA_PAT }}
@@ -111,19 +111,22 @@ jobs:
           cd prefetch
           git init
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ env.JSON_REPO }}.git"
-          if git ls-remote --exit-code --heads origin ${{ env.JSON_BRANCH }}; then
-            git fetch origin ${{ env.JSON_BRANCH }} --depth=1
-            git checkout -B ${{ env.JSON_BRANCH }} FETCH_HEAD
+
+          if git ls-remote --exit-code --heads origin "${{ env.JSON_BRANCH }}"; then
+            git fetch origin "${{ env.JSON_BRANCH }}" --depth=1
+            git checkout -B "${{ env.JSON_BRANCH }}" FETCH_HEAD
+
             if [ -f "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ]; then
-              cp "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ./id_map.json
-              echo "[prefetch] brought id_map.json → $(realpath ./id_map.json)"
+              # ⭐ 핵심: 워크스페이스 루트로 복사
+              cp "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ../id_map.json
+              echo "[prefetch] wrote $(realpath ../id_map.json)"
             else
               echo "[prefetch] no existing id_map.json in JSON repo"
             fi
           else
             echo "[prefetch] JSON branch not found; skipping"
           fi
-          cd .
+          cd ..
 
       - name: Run converter (+ LocalData.xlsx + LocalData.json + rewrite json)
         env:
@@ -131,6 +134,10 @@ jobs:
           ID_START: "1000000"
         run: |
           set -euxo pipefail
+
+          # ✅ 안전장치: id_map.json 없으면 즉시 실패 (ID 리셋 방지)
+          [ -f id_map.json ] || (echo "FATAL: id_map.json missing -> abort to prevent ID reset" && exit 1)
+
 
           # 1) XLSX/CSV -> json + id_map.json
           python scripts/convert_xlsx_to_json.py
