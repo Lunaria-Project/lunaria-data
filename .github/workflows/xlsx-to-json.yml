@@ -31,11 +31,7 @@ env:
   ID_MAP_BASENAME: id_map.json
 
   LOCALDATA_XLSX_BASENAME: LocalData.xlsx
-
-  # localdata_from_json.py가 실제로 생성하는 위치(워크스페이스 기준)
   LOCALDATA_JSON_WORKSPACE_PATH: data/LocalData/LocalData.json
-
-  # (레거시 유지: localdata_from_json.py 실행 인자는 그대로 "LocalData.json" 넘겨도 됨)
   LOCALDATA_JSON_BASENAME: LocalData.json
 
 jobs:
@@ -100,7 +96,7 @@ jobs:
             echo "EOF" >> $GITHUB_ENV
           fi
 
-      -- name: Prefetch id_map.json from JSON repo (if exists)
+      - name: Prefetch id_map.json from JSON repo (if exists)
         if: ${{ github.event_name == 'push' }}
         env:
           GH_TOKEN: ${{ secrets.LUNARIA_PAT }}
@@ -117,7 +113,6 @@ jobs:
             git checkout -B "${{ env.JSON_BRANCH }}" FETCH_HEAD
 
             if [ -f "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ]; then
-              # ⭐ 핵심: 워크스페이스 루트로 복사
               cp "${{ env.JSON_SUBDIR }}/${{ env.META_DIR }}/${{ env.ID_MAP_BASENAME }}" ../id_map.json
               echo "[prefetch] wrote $(realpath ../id_map.json)"
             else
@@ -126,6 +121,7 @@ jobs:
           else
             echo "[prefetch] JSON branch not found; skipping"
           fi
+
           cd ..
 
       - name: Run converter (+ LocalData.xlsx + LocalData.json + rewrite json)
@@ -135,14 +131,13 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # ✅ 안전장치: id_map.json 없으면 즉시 실패 (ID 리셋 방지)
-          [ -f id_map.json ] || (echo "FATAL: id_map.json missing -> abort to prevent ID reset" && exit 1)
+          # ✅ 안전장치: push에서만 강제( PR에서 막히면 불편하면 이 조건 유지 권장 )
+          if [ "${{ github.event_name }}" = "push" ]; then
+            [ -f id_map.json ] || (echo "FATAL: id_map.json missing -> abort to prevent ID reset" && exit 1)
+          fi
 
-
-          # 1) XLSX/CSV -> json + id_map.json
           python scripts/convert_xlsx_to_json.py
 
-          # 2) json -> LocalData.xlsx + (data/LocalData/LocalData.json) + rewrite json local_string cells -> key
           python scripts/localdata_from_json.py \
             --json_dir json \
             --out_xlsx "${{ env.LOCALDATA_XLSX_BASENAME }}" \
@@ -182,17 +177,17 @@ jobs:
           git config user.name "json-export-bot"
           git config user.email "json-export-bot@users.noreply.github.com"
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ env.JSON_REPO }}.git"
-          if git ls-remote --exit-code --heads origin ${{ env.JSON_BRANCH }}; then
-            git fetch origin ${{ env.JSON_BRANCH }} --depth=1
-            git checkout -B ${{ env.JSON_BRANCH }} FETCH_HEAD
+          if git ls-remote --exit-code --heads origin "${{ env.JSON_BRANCH }}"; then
+            git fetch origin "${{ env.JSON_BRANCH }}" --depth=1
+            git checkout -B "${{ env.JSON_BRANCH }}" FETCH_HEAD
           else
-            git checkout --orphan ${{ env.JSON_BRANCH }}
+            git checkout --orphan "${{ env.JSON_BRANCH }}"
             echo "{}" > .init.json
             git add .init.json
             git commit -m "chore: initialize branch"
-            git push -u origin ${{ env.JSON_BRANCH }}
+            git push -u origin "${{ env.JSON_BRANCH }}"
           fi
-          cd .
+          cd ..
 
       - name: Copy, commit & push JSON to target repo
         if: ${{ github.event_name == 'push' }}
@@ -215,7 +210,6 @@ jobs:
             rsync -a "$f" "$JSON_SUBDIR/"
           done
 
-          # id_map.json 스냅샷 반영
           if [ -f ../id_map.json ]; then
             mkdir -p "$JSON_SUBDIR/$META_DIR"
             cp ../id_map.json "$JSON_SUBDIR/$META_DIR/$ID_MAP_BASENAME"
@@ -224,7 +218,6 @@ jobs:
             echo "[copy] id_map.json missing in workspace; nothing to copy"
           fi
 
-          # LocalData.xlsx 스냅샷 반영 (data/_meta/LocalData.xlsx)
           if [ -f ../${{ env.LOCALDATA_XLSX_BASENAME }} ]; then
             mkdir -p "$JSON_SUBDIR/$META_DIR"
             cp ../${{ env.LOCALDATA_XLSX_BASENAME }} "$JSON_SUBDIR/$META_DIR/${{ env.LOCALDATA_XLSX_BASENAME }}"
@@ -233,7 +226,6 @@ jobs:
             echo "[copy] LocalData.xlsx missing in workspace; nothing to copy"
           fi
 
-          # ✅ LocalData.json 스냅샷 반영: (workspace) data/LocalData/LocalData.json -> (target) data/LocalData/LocalData.json
           if [ -f ../${{ env.LOCALDATA_JSON_WORKSPACE_PATH }} ]; then
             mkdir -p "$JSON_SUBDIR/LocalData"
             cp ../${{ env.LOCALDATA_JSON_WORKSPACE_PATH }} "$JSON_SUBDIR/LocalData/LocalData.json"
@@ -242,7 +234,6 @@ jobs:
             echo "[copy] LocalData.json missing in workspace; nothing to copy"
           fi
 
-          # LocalData 경고 파일(있으면) 반영
           if [ -f ../LocalData.warnings.txt ]; then
             mkdir -p "$JSON_SUBDIR/$META_DIR"
             cp ../LocalData.warnings.txt "$JSON_SUBDIR/$META_DIR/LocalData.warnings.txt"
