@@ -161,36 +161,39 @@ def replace_inner_tags(text: str, idmap: dict) -> str:
 
 
 # =========================================================
-# 숫자형 컬럼: 셀 전체가 [TAG] 인 케이스를 숫자로 치환
+# 모든 컬럼: 셀 전체가 [TAG] 인 케이스를 숫자로 치환
 # + 이번 실행에서 변환이 실제로 발생한 컬럼에만 ;id 부착
 # + 변환이 없었던 컬럼은 ;id 제거(이미 오염된 것 원복)
 # =========================================================
-def resolve_placeholders_for_numeric_columns(df: pd.DataFrame, types: dict, idmap: dict):
+def resolve_placeholders(df: pd.DataFrame, types: dict, idmap: dict):
     numeric_bases = {"int", "long"}
 
     for col in df.columns:
         original_type = types.get(col, "")
-        if base_type_of(original_type) not in numeric_bases:
-            continue
+        is_numeric = base_type_of(original_type) in numeric_bases
 
         converted_placeholder = False  # ✅ 이번 실행에서 이 컬럼에 [TAG]가 실제로 있었는지
 
-        def map_cell(x):
+        def map_cell(x, _is_numeric=is_numeric):
             nonlocal converted_placeholder
 
             s = "" if pd.isna(x) else str(x).strip()
             if not s:
-                return 0
+                return 0 if _is_numeric else x
 
             m = ID_TAG_RE.match(s)
             if m:
                 converted_placeholder = True
                 return map_token(idmap, m.group(1).strip())
 
-            # 일반 숫자는 그대로
-            return int(float(s))
+            # 숫자형 컬럼은 숫자로 변환
+            if _is_numeric:
+                return int(float(s))
+            return x
 
-        df[col] = df[col].apply(map_cell).astype("int64")
+        df[col] = df[col].apply(map_cell)
+        if is_numeric:
+            df[col] = df[col].astype("int64")
 
         # ✅ 규칙: placeholder 변환이 "실제로 발생한 컬럼"에만 ;id
         if converted_placeholder:
@@ -217,8 +220,8 @@ def convert_excel(file_path: pathlib.Path, idmap: dict):
 
         types = build_types(header_row, type_row)
 
-        # 1) 숫자형 컬럼에서 셀 전체 [TAG] -> 숫자 치환 + ;id 규칙 적용
-        resolve_placeholders_for_numeric_columns(df, types, idmap)
+        # 1) 모든 컬럼에서 셀 전체 [TAG] -> 숫자 치환 + ;id 규칙 적용
+        resolve_placeholders(df, types, idmap)
 
         # 2) 문자열/리스트 문자열에서 문자열 내부 [TAG] 전부 치환
         #    (요구사항: "[A],[B]" 같이 콤마로 이어진 것도 치환)
