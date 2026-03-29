@@ -79,7 +79,7 @@ def base_type_of(type_str) -> str:
 
 def append_id_marker(type_str: str) -> str:
     if not isinstance(type_str, str) or type_str == "":
-        type_str = "int"
+        return ";id"
     parts = [p.strip() for p in type_str.split(";") if p.strip()]
     if not any(p.lower() == "id" for p in parts):
         parts.append("id")
