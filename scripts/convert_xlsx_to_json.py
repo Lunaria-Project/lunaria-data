@@ -21,8 +21,8 @@ CSV_EXTS = {".csv"}
 ID_MAP_PATH = pathlib.Path(os.environ.get("ID_MAP_PATH", "id_map.json"))
 ID_START = int(os.environ.get("ID_START", "1000000"))
 
-# 셀 전체가 [TAG]
-ID_TAG_RE = re.compile(r"^\[(.+?)\]$")
+# 셀 전체가 단일 [TAG] (내부에 대괄호가 없어야 함 → "[A],[B]"는 매칭 안 됨)
+ID_TAG_RE = re.compile(r"^\[([^\[\]]+)\]$")
 # 문자열 내부의 [TAG]들 전부
 ID_TAG_INNER_RE = re.compile(r"\[([^\[\]]+)\]")
 
@@ -167,14 +167,16 @@ def replace_inner_tags(text: str, idmap: dict) -> str:
 # =========================================================
 def resolve_placeholders(df: pd.DataFrame, types: dict, idmap: dict):
     numeric_bases = {"int", "long"}
+    list_bases = {"list<string>", "list<int>"}
 
     for col in df.columns:
         original_type = types.get(col, "")
         is_numeric = base_type_of(original_type) in numeric_bases
+        is_list = base_type_of(original_type) in list_bases
 
         converted_placeholder = False  # ✅ 이번 실행에서 이 컬럼에 [TAG]가 실제로 있었는지
 
-        def map_cell(x, _is_numeric=is_numeric):
+        def map_cell(x, _is_numeric=is_numeric, _is_list=is_list):
             nonlocal converted_placeholder
 
             s = "" if pd.isna(x) else str(x).strip()
@@ -185,6 +187,11 @@ def resolve_placeholders(df: pd.DataFrame, types: dict, idmap: dict):
             if m:
                 converted_placeholder = True
                 return map_token(idmap, m.group(1).strip())
+
+            # 리스트 컬럼: "[A],[B],[C]"처럼 태그가 여러 개면 각각 치환
+            if _is_list and ID_TAG_INNER_RE.search(s):
+                converted_placeholder = True
+                return replace_inner_tags(s, idmap)
 
             # 숫자형 컬럼은 숫자로 변환
             if _is_numeric:
